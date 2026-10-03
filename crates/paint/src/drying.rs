@@ -572,23 +572,30 @@ impl Canvas {
             Some(t0) => {
                 // when each film sets (its cure is as of `at`), so the cloth
                 // under it is judged as it is then
+                // (paint never waited on has no drying state: fresh, its
+                // thickness judged now, as the first wait would)
+                let th0 = if self.wet.clock.px.is_empty() { self.film_thickness(ex) } else { Vec::new() };
                 let (cp, hide, film, now) = (&self.wet.clock.px, &self.wet.hide, &self.film, self.wet.clock.now);
                 let when: Vec<f32> = (0..ew * eh)
                     .map(|k| {
                         let i = (ex.1 + k / ew) * w + ex.0 + k % ew;
-                        let gel = match cp.get(i) {
-                            Some(p) if add[k] > 0.0 => {
-                                let r = rate(p.th, hide[i][1], hide[i][2]) * Canvas::raw_set(true, film, i);
-                                if r > 0.0 { at + ((GEL - p.cure) / r) as f64 } else { at }
-                            }
-                            _ => at,
+                        let (th, cure) = match cp.get(i) {
+                            Some(p) => (p.th, p.cure),
+                            None => (th0.get(k).copied().unwrap_or(0.0), 0.0),
                         };
+                        let r = rate(th, hide[i][1], hide[i][2]) * Canvas::raw_set(true, film, i);
+                        let gel = if add[k] > 0.0 && r > 0.0 { at + ((GEL - cure) / r) as f64 } else { at };
                         (gel.max(now) - t0) as f32
                     })
                     .collect();
                 self.sink(ex, &add, &t, &cover, &when)
             }
         };
+        // what the cloth can't keep creeps on past the paint, and the cloth
+        // under the paint is drawn for it to lie on
+        if let Some(sk) = &sunk {
+            self.sink_halo(ex, sk);
+        }
         let lean = sunk.as_ref().map(|s| &s.lean[..]);
         let px_um = self.px_mm() * 1000.0;
         let wet = &mut self.wet;
@@ -629,10 +636,6 @@ impl Canvas {
                     cv[x] = 1.0;
                 }
             });
-        // what the cloth couldn't hold creeps on past the paint
-        if let Some(sk) = &sunk {
-            self.sink_halo(ex, sk);
-        }
         let wet = &mut self.wet;
         if wet.clock.px.is_empty() {
             return;
