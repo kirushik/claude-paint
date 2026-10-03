@@ -262,6 +262,7 @@ impl Canvas {
         // age the open films
         if let Some((x0, y0, x1, y1)) = self.wet.dirty {
             let (x1, y1) = (x1.min(w), y1.min(self.f.h));
+            let (soak, film) = (self.soak.is_some(), &self.film);
             let wet = &mut self.wet;
             let (vol, hide) = (&wet.vol, &wet.hide);
             wet.clock.px[y0 * w..y1 * w].par_chunks_mut(w).enumerate().for_each(|(j, row)| {
@@ -269,7 +270,7 @@ impl Canvas {
                     let i = (y0 + j) * w + x;
                     if vol[i] >= 1e-5 {
                         let p = &mut row[x];
-                        p.cure += dt * rate(p.th, hide[i][1], hide[i][2]);
+                        p.cure += dt * rate(p.th, hide[i][1], hide[i][2]) * Canvas::raw_set(soak, film, i);
                     }
                 }
             });
@@ -404,6 +405,7 @@ impl Canvas {
             let th = if self.wet.clock.px.is_empty() { self.film_thickness((x0, y0, x1, y1)) } else { Vec::new() };
             let bw = x1 - x0;
             let (vol, hide, px) = (&self.wet.vol, &self.wet.hide, &self.wet.clock.px);
+            let (soak, film) = (self.soak.is_some(), &self.film);
             left = (y0..y1)
                 .into_par_iter()
                 .map(|y| {
@@ -412,7 +414,7 @@ impl Canvas {
                         let i = y * w + x;
                         if vol[i] >= 1e-5 {
                             let (c, t) = px.get(i).map_or((0.0, th.get((y - y0) * bw + x - x0).copied().unwrap_or(0.0)), |p| (p.cure, p.th));
-                            m = m.max((1.0 - c).max(0.0) / rate(t, hide[i][1], hide[i][2]));
+                            m = m.max((1.0 - c).max(0.0) / (rate(t, hide[i][1], hide[i][2]) * Canvas::raw_set(soak, film, i)));
                         }
                     }
                     m
@@ -511,7 +513,7 @@ impl Canvas {
                         sets[k] = p.lev;
                     }
                     if !all && let Some(p) = cp.get(i) {
-                        rates[k] = rate(p.th, self.wet.hide[i][1], self.wet.hide[i][2]);
+                        rates[k] = rate(p.th, self.wet.hide[i][1], self.wet.hide[i][2]) * Canvas::raw_set(self.soak.is_some(), &self.film, i);
                     }
                     any = true;
                 }
@@ -559,6 +561,9 @@ impl Canvas {
             }
             cv
         };
+        // on a raw canvas, the bare cloth draws oil out of the paint
+        let sunk = if self.soak.is_some() { self.sink(ex, &add, &t, &cover) } else { None };
+        let lean = sunk.as_ref().map(|s| &s.lean[..]);
         let px_um = self.px_mm() * 1000.0;
         let wet = &mut self.wet;
         let (lat, hide) = (&wet.lat, &wet.hide);
@@ -586,12 +591,23 @@ impl Canvas {
                     let ti = t[k] / COAT_UM;
                     let i = y * w + x;
                     let c = mixbox::latent_to_linear_float_rgb(&lat[i]);
-                    px[x] = crate::wet::over_share(Pigment::masstone(c, hide[i][0]), px[x], ti, crate::wet::bead_cover(cover[k], ti, px_um));
+                    let mut pg = Pigment::masstone(c, hide[i][0]);
+                    if let Some(l) = lean
+                        && l[k] != 1.0
+                    {
+                        pg.s = pg.s.map(|v| v * l[k]);
+                    }
+                    px[x] = crate::wet::over_share(pg, px[x], ti, crate::wet::bead_cover(cover[k], ti, px_um));
                     ff[x] += ti;
                     vv[x] = 0.0;
                     cv[x] = 1.0;
                 }
             });
+        // what the cloth couldn't hold creeps on past the paint
+        if let Some(sk) = &sunk {
+            self.sink_halo(ex, sk);
+        }
+        let wet = &mut self.wet;
         if wet.clock.px.is_empty() {
             return;
         }

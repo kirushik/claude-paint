@@ -31,12 +31,17 @@
 //! darker, yellowing halo; paint thinned so far that too little oil is left
 //! to wet the pigment dries lean, pale and matte.
 //!
+//! **Brushed paint** on bare cloth (`Canvas::sink`, as it bakes): the cloth
+//! takes its oil, so it sets sooner (`RAW_SET`) and dries lean, matte and
+//! paler; oil the fibres under it can't keep creeps on past the stroke as a
+//! halo (`Canvas::sink_halo`). Its film seals the cloth against pours.
+//!
 //! **Appearance**: the cloth is one Kubelka–Munk layer over a backing. Its
 //! scattering is lowered where liquid fills the pores, and the deposited
 //! pigments' absorption and scattering are added to it, so a stain is
 //! colour *in* the cloth: the weave shows through it.
 
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Frame};
 use crate::color::{Rgb, hex};
 use crate::mask::Mask;
 use crate::pigment::{Pigment, layer1};
@@ -100,6 +105,20 @@ const RING_MM: f32 = 10.0;
 const PATCH: f32 = 1.0;
 const FEATHER_BASE: f32 = 0.25;
 const FEATHER_SOLV: f32 = 0.5;
+/// Brushed paint on bare cloth: oil by volume of stiff tube paint and of
+/// paint rich in medium (estimates; stiffness stands for how fat the paint
+/// is, as in `drying::rate`).
+const OIL_STIFF: f32 = 0.55;
+const OIL_FLUID: f32 = 0.85;
+/// The cloth draws all the oil the pigment doesn't hold out of the paint,
+/// and this share of what it does hold from the bottom `DRAW_UM` of the
+/// film (estimate: a coat brushed on raw cloth goes matte; impasto keeps a
+/// bound top).
+const DRAW_BOUND: f32 = 0.6;
+const DRAW_UM: f32 = 25.0;
+/// Paint on bare cloth sets this much faster: the cloth takes its oil
+/// (estimate; Bacon's paint on raw canvas "dried very rapidly").
+pub(crate) const RAW_SET: f32 = 4.0;
 
 /// The cloth a raw canvas is woven from.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -173,6 +192,24 @@ pub struct Soak {
     /// Buffer box of everything ever soaked.
     pub(crate) stained: Option<(usize, usize, usize, usize)>,
     pub(crate) pours: u64,
+}
+
+/// What the cloth did to paint baking on it (`Canvas::sink`), per cell of
+/// the bake's box.
+pub(crate) struct Sunk {
+    /// The paint film's scattering factor: above 1 where the cloth drew so
+    /// much oil that too little is left to wet the pigment.
+    pub(crate) lean: Vec<f32>,
+    /// Oil the cloth there can't hold, µm (it creeps on: `sink_halo`).
+    excess: Vec<f32>,
+    /// Where the cloth drew oil.
+    sank: Vec<bool>,
+}
+
+/// Oil by volume of wet paint of stiffness `stiff`.
+#[inline]
+fn oil_share(stiff: f32) -> f32 {
+    OIL_STIFF + (OIL_FLUID - OIL_STIFF) * (1.0 - stiff.clamp(0.0, 1.0))
 }
 
 /// One pour: a pile thinned with turpentine.
@@ -341,6 +378,153 @@ type Heap = BinaryHeap<Reverse<(u32, u32)>>;
 #[inline]
 fn kbits(k: f32) -> u32 {
     k.max(0.0).to_bits()
+}
+
+/// How fast liquid passes from cell `a` to its neighbour `b` at offset
+/// (`ox`, `oy`), by the cloth's `cells` (`Soak::wick_cells`), faster
+/// downhill on a tilted canvas.
+fn speed(cells: &[(f32, f32, f32)], a: usize, b: usize, ox: i32, oy: i32, tilt: Option<(f32, f32)>) -> f32 {
+    let (ca, cb) = (cells[a], cells[b]);
+    let (ax, ay) = (ox.unsigned_abs() as f32, oy.unsigned_abs() as f32);
+    let v = (ax * (ca.1 + cb.1) + ay * (ca.2 + cb.2)) / (2.0 * (ax + ay));
+    match tilt {
+        None => v,
+        Some((ang, g)) => {
+            let l = (ax * ax + ay * ay).sqrt();
+            let d = (ox as f32 * ang.cos() + oy as f32 * ang.sin()) / l;
+            v * (1.0 + 0.9 * g * d).max(0.15)
+        }
+    }
+}
+
+impl Soak {
+    /// The cloth in buffer box `b` (x0, y0, x1, y1; `f` the buffer's
+    /// frame, `dx` mm per pixel) at time `now`, cell by cell: the room left
+    /// in its pores (mm³) and how readily it passes liquid along x (the
+    /// weft) and y (the warp). Cloth under a paint film takes nothing.
+    /// `sig` is how strongly it feathers along the threads; a pour adds its
+    /// own unevenness (`pour_seed`).
+    #[allow(clippy::too_many_arguments)]
+    fn wick_cells(&self, film: &[f32], f: Frame, b: (usize, usize, usize, usize), now: f32, dx: f32, sig: f32, pour_seed: Option<u64>) -> Vec<(f32, f32, f32)> {
+        let (x0, y0, x1, y1) = b;
+        let (w, rw) = (f.w, x1 - x0);
+        let area = dx * dx;
+        let cseed = self.seed;
+        (0..rw * (y1 - y0))
+            .into_par_iter()
+            .map(|li| {
+                let i = (y0 + li / rw) * w + x0 + li % rw;
+                if film[i] > 1e-3 {
+                    return (0.0, 0.0, 0.0);
+                }
+                let cap = self.cap[i];
+                let sn = self.solv_at(i, now);
+                let oil = self.oil[i] + self.oil_pend[i];
+                let free = (cap - oil - sn).max(0.0) * 1.0e-3 * area;
+                let wet = (sn / cap).min(1.0);
+                let oily = (oil / (0.3 * cap)).min(1.0);
+                let mult = (1.0 + 1.5 * wet) * (1.0 - 0.85 * oily);
+                let (xm, ym) = (((li % rw + x0 + f.x0) as f32 + 0.5) * dx, ((li / rw + y0 + f.y0) as f32 + 0.5) * dx);
+                // lobes of looser and tighter weave (isotropic, 4-30 mm),
+                // fine streaks along the threads (feathering, stronger in a
+                // thin liquid), and a pour's own unevenness
+                let patch = 0.55 * vnoise(xm / 30.0, ym / 30.0, cseed ^ 0x55) + 0.3 * vnoise(xm / 11.0, ym / 11.0, cseed ^ 0x57) + 0.15 * vnoise(xm / 4.0, ym / 4.0, cseed ^ 0x58) - 0.5;
+                let nw = vnoise(xm / 0.9, ym / 9.0, cseed ^ 0x51) - 0.5;
+                let nf = vnoise(xm / 9.0, ym / 0.9, cseed ^ 0x53) - 0.5;
+                let own = match pour_seed {
+                    Some(ps) => 0.25 * (vnoise(xm / 7.0, ym / 7.0, ps ^ 0x56) - 0.5),
+                    None => 0.0,
+                };
+                let ky = self.fabric.warp_bias * (PATCH * patch + sig * nw + own).exp() * mult;
+                let kx = (PATCH * patch + sig * nf + own).exp() * mult;
+                (free, kx, ky)
+            })
+            .collect()
+    }
+
+    /// Oil the cloth can't hold creeps on through it: from the `edge`
+    /// cells (local indices of the box `b` = (x0, y0, width, height) of a
+    /// buffer `w` wide, each with its group) outward into cells not
+    /// `inside`, nearest first (by how readily the cloth there wicks), up to
+    /// `HALO_MM`, filling each to `HALO_FILL` of its pores. A group's oil
+    /// (`budget`, µm summed over cells) goes only where its own edge
+    /// reaches first; what is left of it stays in `budget`. Returns (cell,
+    /// oil µm, mm from the edge, the edge cell it came from).
+    #[allow(clippy::too_many_arguments)]
+    fn creep(&self, cells: &[(f32, f32, f32)], b: (usize, usize, usize, usize), w: usize, dx: f32, now: f32, inside: &[bool], edge: &[(usize, usize)], budget: &mut [f32]) -> Vec<(usize, f32, f32, usize)> {
+        let (x0, y0, rw, rh) = b;
+        let nl = rw * rh;
+        let mut halo = Vec::new();
+        let mut open = budget.iter().filter(|&&e| e > 1e-4).count();
+        if open == 0 {
+            return halo;
+        }
+        let mut hkey = vec![f32::INFINITY; nl];
+        let mut horig = vec![u32::MAX; nl];
+        let mut hgroup = vec![0u32; nl];
+        let mut hdone = vec![false; nl];
+        let mut heap = Heap::new();
+        for &(li, g) in edge {
+            if budget[g] > 1e-4 {
+                hkey[li] = 0.0;
+                horig[li] = li as u32;
+                hgroup[li] = g as u32;
+                heap.push(Reverse((kbits(0.0), li as u32)));
+            }
+        }
+        while let Some(Reverse((kb, li))) = heap.pop() {
+            let li = li as usize;
+            if hdone[li] || f32::from_bits(kb) > hkey[li] {
+                continue;
+            }
+            let g = hgroup[li] as usize;
+            if budget[g] <= 1e-4 {
+                continue;
+            }
+            hdone[li] = true;
+            if !inside[li] {
+                let i = (y0 + li / rw) * w + x0 + li % rw;
+                let room = (HALO_FILL * self.cap[i] - (self.oil[i] + self.oil_pend[i] + self.solv_at(i, now))).max(0.0);
+                if cells[li].1 > 0.0 && room > 0.0 {
+                    let put = room.min(budget[g]);
+                    budget[g] -= put;
+                    halo.push((li, put, hkey[li], horig[li] as usize));
+                    if budget[g] <= 1e-4 {
+                        open -= 1;
+                        if open == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+            let (x, y) = ((li % rw) as i32, (li / rw) as i32);
+            for &(ox, oy, len) in NEIGH16.iter() {
+                let (nx, ny) = (x + ox, y + oy);
+                if nx < 0 || ny < 0 || nx >= rw as i32 || ny >= rh as i32 {
+                    continue;
+                }
+                let nli = ny as usize * rw + nx as usize;
+                if hdone[nli] || inside[nli] {
+                    continue;
+                }
+                let v = speed(cells, li, nli, ox, oy, None);
+                if v <= 1e-6 {
+                    continue;
+                }
+                // distance in mm, weighted by how readily the cloth
+                // wicks there (relative to its mean)
+                let nk = hkey[li] + len * dx / v.max(0.05);
+                if nk <= HALO_MM && nk < hkey[nli] {
+                    hkey[nli] = nk;
+                    horig[nli] = horig[li];
+                    hgroup[nli] = g as u32;
+                    heap.push(Reverse((kbits(nk), nli as u32)));
+                }
+            }
+        }
+        halo
+    }
 }
 
 impl Canvas {
@@ -545,36 +729,7 @@ impl Canvas {
         // room in the pores (mm³) and how readily the cloth passes liquid
         // along x (the weft) and y (the warp)
         let sig = FEATHER_BASE + FEATHER_SOLV * s0;
-        let cseed = s.seed;
-        let pseed = p.seed;
-        let film = &self.film;
-        let cells: Vec<(f32, f32, f32)> = (0..nl)
-            .into_par_iter()
-            .map(|li| {
-                let i = gi(li);
-                if film[i] > 1e-3 {
-                    return (0.0, 0.0, 0.0);
-                }
-                let cap = s.cap[i];
-                let sn = s.solv_at(i, now);
-                let oil = s.oil[i] + s.oil_pend[i];
-                let free = (cap - oil - sn).max(0.0) * 1.0e-3 * area;
-                let wet = (sn / cap).min(1.0);
-                let oily = (oil / (0.3 * cap)).min(1.0);
-                let mult = (1.0 + 1.5 * wet) * (1.0 - 0.85 * oily);
-                let (xm, ym) = (((li % rw + x0 + f.x0) as f32 + 0.5) * dx, ((li / rw + y0 + f.y0) as f32 + 0.5) * dx);
-                // lobes of looser and tighter weave (isotropic, 4-30 mm),
-                // fine streaks along the threads (feathering, stronger in a
-                // thin liquid), and the pour's own unevenness
-                let patch = 0.55 * vnoise(xm / 30.0, ym / 30.0, cseed ^ 0x55) + 0.3 * vnoise(xm / 11.0, ym / 11.0, cseed ^ 0x57) + 0.15 * vnoise(xm / 4.0, ym / 4.0, cseed ^ 0x58) - 0.5;
-                let nw = vnoise(xm / 0.9, ym / 9.0, cseed ^ 0x51) - 0.5;
-                let nf = vnoise(xm / 9.0, ym / 0.9, cseed ^ 0x53) - 0.5;
-                let own = 0.25 * (vnoise(xm / 7.0, ym / 7.0, pseed ^ 0x56) - 0.5);
-                let ky = s.fabric.warp_bias * (PATCH * patch + sig * nw + own).exp() * mult;
-                let kx = (PATCH * patch + sig * nf + own).exp() * mult;
-                (free, kx, ky)
-            })
-            .collect();
+        let cells = s.wick_cells(&self.film, f, (x0, y0, x1, y1), now, dx, sig, Some(p.seed));
         // more poured here: it pushes further (a head start from the
         // liquid's local excess over what the cloth there holds)
         let mut landv = vec![0.0f32; nl];
@@ -600,19 +755,6 @@ impl Canvas {
                 heap.push(Reverse((kbits(key[li]), li as u32)));
             }
         }
-        let speed = |a: usize, b: usize, ox: i32, oy: i32, tilt: Option<(f32, f32)>| -> f32 {
-            let (ca, cb) = (cells[a], cells[b]);
-            let (ax, ay) = (ox.unsigned_abs() as f32, oy.unsigned_abs() as f32);
-            let v = (ax * (ca.1 + cb.1) + ay * (ca.2 + cb.2)) / (2.0 * (ax + ay));
-            match tilt {
-                None => v,
-                Some((ang, g)) => {
-                    let l = (ax * ax + ay * ay).sqrt();
-                    let d = (ox as f32 * ang.cos() + oy as f32 * ang.sin()) / l;
-                    v * (1.0 + 0.9 * g * d).max(0.15)
-                }
-            }
-        };
         let mut left = vol;
         while let Some(Reverse((kb, li))) = heap.pop() {
             let li = li as usize;
@@ -637,7 +779,7 @@ impl Canvas {
                 if done[nli] {
                     continue;
                 }
-                let v = speed(li, nli, ox, oy, p.tilt);
+                let v = speed(&cells, li, nli, ox, oy, p.tilt);
                 if v <= 1e-6 {
                     continue;
                 }
@@ -805,61 +947,10 @@ impl Canvas {
             e_total += e;
         }
         // the halo: from the edge outward, into cloth this pour didn't reach
-        let mut hkey = vec![f32::INFINITY; nl];
-        let mut horig = vec![u32::MAX; nl];
-        let mut hdone = vec![false; nl];
-        let mut halo: Vec<(usize, f32, f32, usize)> = Vec::new(); // (li, oil µm, mm, origin)
-        let mut e_left = e_total;
-        if e_total > 1e-4 {
-            let mut heap = Heap::new();
-            for &li in &edge_cells {
-                hkey[li] = 0.0;
-                horig[li] = li as u32;
-                heap.push(Reverse((kbits(0.0), li as u32)));
-            }
-            while let Some(Reverse((kb, li))) = heap.pop() {
-                let li = li as usize;
-                if hdone[li] || f32::from_bits(kb) > hkey[li] {
-                    continue;
-                }
-                hdone[li] = true;
-                if !done[li] {
-                    let i = gi(li);
-                    let room = (HALO_FILL * s.cap[i] - (s.oil[i] + s.oil_pend[i] + s.solv_at(i, now))).max(0.0);
-                    if cells[li].1 > 0.0 && room > 0.0 {
-                        let put = room.min(e_left);
-                        e_left -= put;
-                        halo.push((li, put, hkey[li], horig[li] as usize));
-                        if e_left <= 1e-4 {
-                            break;
-                        }
-                    }
-                }
-                let (x, y) = ((li % rw) as i32, (li / rw) as i32);
-                for &(ox, oy, len) in NEIGH16.iter() {
-                    let (nx, ny) = (x + ox, y + oy);
-                    if nx < 0 || ny < 0 || nx >= rw as i32 || ny >= rh as i32 {
-                        continue;
-                    }
-                    let nli = ny as usize * rw + nx as usize;
-                    if hdone[nli] || done[nli] {
-                        continue;
-                    }
-                    let v = speed(li, nli, ox, oy, None);
-                    if v <= 1e-6 {
-                        continue;
-                    }
-                    // distance in mm, weighted by how readily the cloth
-                    // wicks there (relative to its mean)
-                    let nk = hkey[li] + len * dx / v.max(0.05);
-                    if nk <= HALO_MM && nk < hkey[nli] {
-                        hkey[nli] = nk;
-                        horig[nli] = horig[li];
-                        heap.push(Reverse((kbits(nk), nli as u32)));
-                    }
-                }
-            }
-        }
+        let edge: Vec<(usize, usize)> = edge_cells.iter().map(|&li| (li, 0)).collect();
+        let mut budget = [e_total];
+        let halo = s.creep(&cells, (x0, y0, rw, rh), w, dx, now, &done, &edge, &mut budget);
+        let e_left = budget[0];
         let placed = (e_total - e_left).max(0.0);
         let keep = if e_total > 1e-6 { 1.0 - placed / e_total } else { 1.0 };
         // when things happen
@@ -1013,6 +1104,190 @@ impl Canvas {
             self.soak_render((bx0, by0, bx1, by1));
         }
         Ok(lifted * 1.0e-3)
+    }
+
+    /// How much faster the open paint at pixel `i` sets: `RAW_SET` where it
+    /// lies on bare raw cloth, else 1.
+    #[inline]
+    pub(crate) fn raw_set(soak: bool, film: &[f32], i: usize) -> f32 {
+        if soak && film[i] < 1e-3 { RAW_SET } else { 1.0 }
+    }
+
+    /// Paint about to bake (`drying::bake`) where it lies on bare raw
+    /// cloth: the cloth draws oil out of it. `ex` is the bake's buffer box;
+    /// `add` the paint baking (µm, 0 where none does), `t` its settled µm
+    /// and `cover` the share of each pixel it covers, per cell of the box.
+    /// The oil the paint's pigment doesn't hold goes, and some of what it
+    /// holds from the bottom of the film, so a thin film is left lean:
+    /// matte and paler, its pigment scattering in air. The oil is liquid in
+    /// the wet film, so how lean the film is left is judged over a few
+    /// millimetres of it (`FILM_MM`, as its drying is), not thread by
+    /// thread. The fibres keep a little of the oil (the cloth under the
+    /// paint darkens with it, and the paint is composited over that); the
+    /// rest creeps on past the paint (`sink_halo`, once the films are
+    /// baked). Cloth that already holds oil draws less. None on a primed
+    /// canvas.
+    pub(crate) fn sink(&mut self, ex: (usize, usize, usize, usize), add: &[f32], t: &[f32], cover: &[f32]) -> Option<Sunk> {
+        let dx = self.px_mm();
+        let w = self.f.w;
+        let s = self.soak.as_mut()?;
+        let now = (self.wet.clock.now - s.t0) as f32;
+        let (ew, eh) = (ex.2 - ex.0, ex.3 - ex.1);
+        // where paint bakes on bare cloth, and how thick it lies there
+        // (where it lies), over the film around it
+        let on = |k: usize| {
+            let i = (ex.1 + k / ew) * w + ex.0 + k % ew;
+            add[k] > 0.0 && t[k] > 0.0 && self.film[i] < 1e-3
+        };
+        let mut th = vec![0.0f32; ew * eh];
+        let mut m = vec![0.0f32; ew * eh];
+        let mut any = false;
+        for k in 0..ew * eh {
+            if on(k) {
+                th[k] = t[k] / crate::wet::bead_cover(cover[k], t[k] / COAT_UM, dx * 1000.0).max(1e-6);
+                m[k] = 1.0;
+                any = true;
+            }
+        }
+        if !any {
+            return None;
+        }
+        let q = crate::drying::FILM_MM / dx;
+        let r = ((0.5 * ((1.0 + 6.0 * q * q).sqrt() - 1.0)).round() as usize).max(1);
+        let blur = |f: &[f32]| box_blur(&box_blur(f, ew, eh, r), ew, eh, r);
+        let (bth, bm) = (blur(&th), blur(&m));
+        let mut lean = vec![1.0f32; ew * eh];
+        let mut excess = vec![0.0f32; ew * eh];
+        let mut sank = vec![false; ew * eh];
+        any = false;
+        for k in 0..ew * eh {
+            if m[k] <= 0.0 {
+                continue;
+            }
+            let i = (ex.1 + k / ew) * w + ex.0 + k % ew;
+            let tl = bth[k] / bm[k].max(1e-6);
+            // per µm of the paint: its oil, what its pigment holds of it
+            // and what the cloth draws
+            let phi = oil_share(self.wet.hide[i][1]);
+            let need = PIG_OIL * (1.0 - phi);
+            let bound = phi.min(need);
+            let free = phi - bound;
+            let cap = s.cap[i].max(1.0);
+            let held = s.oil[i] + s.oil_pend[i];
+            let suction = 1.0 - 0.85 * (held / (0.3 * cap)).min(1.0);
+            let room = (cap - held - s.solv_at(i, now)).max(0.0);
+            let drawn = (suction * (free + DRAW_BOUND * bound * (DRAW_UM / tl.max(1e-3)).min(1.0)) * t[k]).min(room);
+            if drawn <= 0.0 {
+                continue;
+            }
+            let left = bound - (drawn / t[k] - free).max(0.0);
+            let bind = if need > 1e-6 { (left / need).clamp(0.0, 1.0) } else { 1.0 };
+            lean[k] = 1.0 + LEAN_SCATTER * (1.0 - bind);
+            let keep = (OIL_RETAIN * cap - held).clamp(0.0, drawn);
+            if keep > 0.0 {
+                s.oil[i] += keep;
+                s.oil_since[i] = s.oil_since[i].min(now);
+            }
+            excess[k] = drawn - keep;
+            sank[k] = true;
+            any = true;
+        }
+        if !any {
+            return None;
+        }
+        s.stained = grow(s.stained, ex);
+        // the cloth under the paint, with its oil, for the paint to lie on
+        self.soak_render(ex);
+        Some(Sunk { lean, excess, sank })
+    }
+
+    /// The oil the cloth under freshly baked paint couldn't hold (`sink`)
+    /// creeps on past each stroke's edge over the next day or two: a
+    /// darker, yellowing halo in the bare cloth around it.
+    pub(crate) fn sink_halo(&mut self, ex: (usize, usize, usize, usize), sunk: &Sunk) {
+        let (w, h) = (self.f.w, self.f.h);
+        let dx = self.px_mm();
+        let s = self.soak.as_ref().unwrap();
+        let now = (self.wet.clock.now - s.t0) as f32;
+        let (ew, eh) = (ex.2 - ex.0, ex.3 - ex.1);
+        // the box the oil can reach
+        let pad = ((2.5 * HALO_MM) / dx).ceil() as usize + 4;
+        let (x0, y0, x1, y1) = (ex.0.saturating_sub(pad), ex.1.saturating_sub(pad), (ex.2 + pad).min(w), (ex.3 + pad).min(h));
+        let (rw, rh) = (x1 - x0, y1 - y0);
+        let nl = rw * rh;
+        let mut inside = vec![false; nl];
+        let mut exc = vec![0.0f32; nl];
+        for y in 0..eh {
+            for x in 0..ew {
+                let k = y * ew + x;
+                if sunk.sank[k] {
+                    let li = (ex.1 + y - y0) * rw + ex.0 + x - x0;
+                    inside[li] = true;
+                    exc[li] = sunk.excess[k];
+                }
+            }
+        }
+        // each stroke (a 4-connected patch) spends its own oil, from its
+        // own edge
+        let mut group = vec![u32::MAX; nl];
+        let mut budget: Vec<f32> = Vec::new();
+        let mut edge: Vec<(usize, usize)> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        for start in 0..nl {
+            if !inside[start] || group[start] != u32::MAX {
+                continue;
+            }
+            let g = budget.len();
+            budget.push(0.0);
+            group[start] = g as u32;
+            stack.push(start);
+            while let Some(li) = stack.pop() {
+                budget[g] += exc[li];
+                let (x, y) = ((li % rw) as i32, (li / rw) as i32);
+                let mut rim = false;
+                for &(ox, oy, _) in &NEIGH[..4] {
+                    let (nx, ny) = (x + ox, y + oy);
+                    if nx < 0 || ny < 0 || nx >= rw as i32 || ny >= rh as i32 {
+                        rim = true;
+                        continue;
+                    }
+                    let nli = ny as usize * rw + nx as usize;
+                    if !inside[nli] {
+                        rim = true;
+                    } else if group[nli] == u32::MAX {
+                        group[nli] = g as u32;
+                        stack.push(nli);
+                    }
+                }
+                if rim {
+                    edge.push((li, g));
+                }
+            }
+        }
+        if budget.iter().all(|&e| e <= 1e-4) {
+            return;
+        }
+        edge.sort_unstable();
+        let cells = s.wick_cells(&self.film, self.f, (x0, y0, x1, y1), now, dx, FEATHER_BASE, None);
+        let halo = s.creep(&cells, (x0, y0, rw, rh), w, dx, now, &inside, &edge, &mut budget);
+        let s = self.soak.as_mut().unwrap();
+        let mut box_ = (w, h, 0usize, 0usize);
+        for &(li, put, d, _) in &halo {
+            let i = (y0 + li / rw) * w + x0 + li % rw;
+            let (x, y) = (i % w, i / w);
+            box_ = (box_.0.min(x), box_.1.min(y), box_.2.max(x + 1), box_.3.max(y + 1));
+            let at = now + HALO_DAYS * 1440.0 * (d / HALO_MM).powi(2);
+            if s.oil_pend[i] > 0.0 {
+                s.oil_t[i] = s.oil_t[i].min(at);
+            } else {
+                s.oil_t[i] = at;
+            }
+            s.oil_pend[i] += put;
+        }
+        if box_.2 > box_.0 {
+            s.active = grow(s.active, box_);
+            s.stained = grow(s.stained, box_);
+        }
     }
 }
 
@@ -1185,6 +1460,91 @@ mod tests {
         let on_line = mean_lum(&c, 480.0, 497.0, 520.0, 503.0);
         let beside = mean_lum(&c, 480.0, 520.0, 520.0, 526.0);
         assert!(on_line < beside * 0.9, "line {line} on {on_line} beside {beside}");
+    }
+
+    /// A band of `p` brushed across the canvas at `y`.
+    fn brush(c: &mut Canvas, p: crate::wet::Paint, y: f32, amount: f32) {
+        let mut h = crate::bristle::Held::new(crate::bristle::Tool::filbert(40.0), 1);
+        h.load(p, amount);
+        c.drag(&mut h, &crate::bristle::Gesture::new(vec![(150.0, y), (850.0, y)]).pressure(0.9, 0.9), None);
+    }
+
+    /// The same cloth, but nothing soaks into it (as if it were primed).
+    fn sealed(width: usize, mm: f32) -> Canvas {
+        Canvas::new_window(width, 1.0, Fabric::cotton_duck().color, None).with_size_mm(mm).with_linen(Linen { seed: 3, ..Linen::fine(3) })
+    }
+
+    fn seen_lum(c: &Canvas, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
+        let f = c.frame();
+        let seen = c.seen();
+        let (mut s, mut n) = (0.0f32, 0usize);
+        for (i, p) in seen.iter().enumerate() {
+            let (u, v) = ((i % f.w) as f32 / f.scale, (i / f.w) as f32 / f.scale);
+            if u >= x0 && u < x1 && v >= y0 && v < y1 {
+                s += luminance(*p);
+                n += 1;
+            }
+        }
+        s / n.max(1) as f32
+    }
+
+    #[test]
+    fn brushed_paint_on_raw_cloth_dries_lean_and_pale() {
+        // a dark body colour: it looks the same wet and dry on a sealed
+        // canvas; on raw cloth the cloth takes its oil and it dries paler
+        let dark = crate::wet::Paint::body(hex("#1c2350"));
+        let change = |mut c: Canvas| {
+            brush(&mut c, dark, 500.0, 1.0);
+            let wet = seen_lum(&c, 300.0, 495.0, 700.0, 505.0);
+            c.dry();
+            let dry = seen_lum(&c, 300.0, 495.0, 700.0, 505.0);
+            (c, dry / wet)
+        };
+        let (_, sealed_change) = change(sealed(240, 400.0));
+        let (c, raw_change) = change(raw(240, 400.0));
+        assert!((sealed_change - 1.0).abs() < 0.05, "sealed: {sealed_change}");
+        assert!(raw_change > 1.15, "raw: {raw_change}");
+        // the cloth under it holds oil
+        let d = c.soaked_at(500.0, 500.0).unwrap();
+        assert!(d.contains("oil") && d.contains("under a paint film"), "{d}");
+    }
+
+    #[test]
+    fn paint_on_raw_cloth_sets_faster() {
+        use crate::drying::Stage;
+        let p = crate::wet::Paint::body(hex("#8a6a40"));
+        let (mut r, mut s) = (raw(200, 400.0), sealed(200, 400.0));
+        brush(&mut r, p, 500.0, 1.0);
+        brush(&mut s, p, 500.0, 1.0);
+        r.wait(60.0);
+        s.wait(60.0);
+        assert_eq!(s.drying_at(500.0, 500.0), Stage::Open);
+        assert_ne!(r.drying_at(500.0, 500.0), Stage::Open);
+        // set within two hours; on a sealed canvas it is still workable
+        r.wait(60.0);
+        s.wait(60.0);
+        assert_eq!(r.drying_at(500.0, 500.0), Stage::Tacky);
+        assert_ne!(s.drying_at(500.0, 500.0), Stage::Tacky);
+    }
+
+    #[test]
+    fn fat_paint_on_raw_cloth_leaves_an_oil_halo() {
+        // paint rich in medium, laid thick: more oil than the cloth under
+        // it keeps, and it creeps out past the stroke over a day or two
+        let fat = crate::wet::Paint::new(hex("#b04a30"), 0.9, 0.2);
+        let mut c = raw(240, 400.0);
+        let before = mean_lum(&c, 300.0, 528.0, 700.0, 536.0);
+        brush(&mut c, fat, 500.0, 2.0);
+        c.dry();
+        c.wait(3.0 * 1440.0);
+        let s = c.soak.as_ref().unwrap();
+        assert!(s.oil_pend.iter().all(|&v| v == 0.0));
+        // the cloth just past the stroke is darker than it was, and than
+        // cloth far from it
+        let near = mean_lum(&c, 300.0, 528.0, 700.0, 536.0);
+        let far = mean_lum(&c, 300.0, 700.0, 700.0, 720.0);
+        assert!(near < 0.95 * before && near < 0.95 * far, "before {before} near {near} far {far}");
+        assert!((far - before).abs() < 0.01, "before {before} far {far}");
     }
 
     #[test]

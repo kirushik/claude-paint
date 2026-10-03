@@ -57,6 +57,22 @@ Sources are listed at the end; [n] marks them. "Estimate" marks numbers not take
 - Refractive indices (estimate from general knowledge, not from the sources above):
   cellulose ~1.53-1.56, linseed oil ~1.48, turpentine ~1.47, water 1.33.
 
+## Oil paint brushed onto raw canvas
+- "The sinking of oil into unprimed canvas can lead to ... darkening, and halos of
+  oil staining where raw canvas is exposed" [5].
+- Bacon painted on the unprimed side of the canvas, "forcing the paint to dry very
+  rapidly and resist any attempts at clean removal" [18].
+- Paint that loses oil until its pigment is no longer wetted (above the critical
+  pigment volume concentration) has air between the particles: it scatters more,
+  so it looks matte and paler, and darks lose the most depth (general paint
+  science, not from the sources above).
+- The engine: the cloth draws out the oil the pigment doesn't hold and 60% of what
+  it holds from the bottom 25 µm of the film, judged over 1.25 mm of film (the oil
+  is liquid in it); paint on bare cloth sets 4× sooner; oil the fibres can't keep
+  creeps on as the pour's halo does. Oil by volume of wet paint is estimated from
+  its stiffness (0.55 stiff tube paint .. 0.85 rich in medium), as the drying model
+  estimates fatness. All of these are estimates.
+
 ## Numbers used as estimates (not from the sources)
 - Viscosity: turpentine ~1.4 mPa·s, raw linseed oil ~30-50 mPa·s; mixtures by
   log-mixing; pigment raises viscosity (Krieger–Dougherty).
@@ -83,3 +99,4 @@ Sources are listed at the end; [n] marks them. "Estimate" marks numbers not take
 15. Lekner & Dorf, Why some things are darker when wet (1988): https://pubmed.ncbi.nlm.nih.gov/20531554/
 16. Twomey, Bohren, Mergenthaler, Reflectance and albedo differences between wet and dry surfaces (1986): https://opg.optica.org/ao/abstract.cfm?uri=ao-25-3-431
 17. ScienceABC, why wet clothes look darker: https://www.scienceabc.com/eyeopeners/why-do-clothes-appear-darker-when-they-get-wet-1
+18. Jack Schaedler, notes on Francis Bacon (citing Michael Peppiatt, *Francis Bacon: Anatomy of an Enigma*): https://jackschaedler.github.io/notes/bacon.html

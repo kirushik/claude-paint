@@ -261,8 +261,16 @@ print(soaked(x, y))                   -- what is in the cloth there, in words
   stain takes less, so a pour over it stays smaller.
 - `blot` lifts turpentine, some oil and the pigment still loose where the
   cloth is wet; dry cloth gives nothing back.
-- A brush works on a raw canvas as anywhere: its film lies on the cloth and
-  seals it, and nothing poured later soaks in under it.
+- A brush works on a raw canvas too, but the cloth takes the paint's oil.
+  Paint brushed onto bare cloth sets about four times sooner than on a
+  ground (less time to blend it or lift it off). As it sets, the cloth
+  draws out the oil its pigment doesn't hold and some of what it does, so
+  a thin coat dries lean: matte and paler, the darks most of all; thick
+  paint keeps more. Oil the fibres under it can't keep creeps on past the
+  stroke over the next day or two: a darker, yellowing halo in the bare
+  cloth around fat or thick paint. Paint over paint, or over cloth already
+  oily from a stain, gives up less. The film seals the cloth: nothing
+  poured later soaks in under it, and a pour runs around it.
 
 ## Masks and geometry
 
