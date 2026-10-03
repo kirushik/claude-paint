@@ -298,7 +298,7 @@ impl Canvas {
             }
         }
         // films past the gel point level and set
-        self.bake(false);
+        self.bake(false, self.wet.clock.now + dt as f64);
         self.wet.clock.now += dt as f64;
         self.soak_tick(dt);
     }
@@ -434,7 +434,7 @@ impl Canvas {
                 }
             }
         }
-        self.bake(true);
+        self.bake(true, self.wet.clock.now);
         let left = left.max(self.soak_left());
         self.wet.clock.now += left as f64;
         self.soak_tick(left);
@@ -490,7 +490,9 @@ impl Canvas {
 
     /// Level and bake open films into the dry picture: every film (`all`,
     /// clearing the wet layer's residue too) or those past the gel point.
-    fn bake(&mut self, all: bool) {
+    /// The open films' cure is as of `at` (the end of the wait that aged
+    /// them): a raw canvas's cloth is judged as it was when each one set.
+    fn bake(&mut self, all: bool, at: f64) {
         let Some((x0, y0, x1, y1)) = self.wet.dirty else { return };
         let (w, h) = (self.f.w, self.f.h);
         let (x1, y1) = (x1.min(w), y1.min(h));
@@ -565,7 +567,28 @@ impl Canvas {
             cv
         };
         // on a raw canvas, the bare cloth draws oil out of the paint
-        let sunk = if self.soak.is_some() { self.sink(ex, &add, &t, &cover) } else { None };
+        let sunk = match self.soak.as_ref().map(|s| s.t0) {
+            None => None,
+            Some(t0) => {
+                // when each film sets (its cure is as of `at`), so the cloth
+                // under it is judged as it is then
+                let (cp, hide, film, now) = (&self.wet.clock.px, &self.wet.hide, &self.film, self.wet.clock.now);
+                let when: Vec<f32> = (0..ew * eh)
+                    .map(|k| {
+                        let i = (ex.1 + k / ew) * w + ex.0 + k % ew;
+                        let gel = match cp.get(i) {
+                            Some(p) if add[k] > 0.0 => {
+                                let r = rate(p.th, hide[i][1], hide[i][2]) * Canvas::raw_set(true, film, i);
+                                if r > 0.0 { at + ((GEL - p.cure) / r) as f64 } else { at }
+                            }
+                            _ => at,
+                        };
+                        (gel.max(now) - t0) as f32
+                    })
+                    .collect();
+                self.sink(ex, &add, &t, &cover, &when)
+            }
+        };
         let lean = sunk.as_ref().map(|s| &s.lean[..]);
         let px_um = self.px_mm() * 1000.0;
         let wet = &mut self.wet;

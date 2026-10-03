@@ -119,7 +119,8 @@ const OIL_FLUID: f32 = 0.85;
 const DRAW_BOUND: f32 = 0.6;
 const DRAW_UM: f32 = 25.0;
 /// Paint on bare cloth sets this much faster: the cloth takes its oil
-/// (estimate; Bacon's paint on raw canvas "dried very rapidly").
+/// (estimate; on the raw side of the canvas Bacon's paint was forced "to dry
+/// very rapidly", and Russell found it left underbound: research note).
 pub(crate) const RAW_SET: f32 = 4.0;
 
 /// The cloth a raw canvas is woven from.
@@ -206,6 +207,8 @@ pub(crate) struct Sunk {
     excess: Vec<f32>,
     /// Where the cloth drew oil.
     sank: Vec<bool>,
+    /// When each film set (minutes after the soak's `t0`).
+    when: Vec<f32>,
 }
 
 /// Oil by volume of wet paint of stiffness `stiff`.
@@ -1199,8 +1202,10 @@ impl Canvas {
 
     /// Paint about to bake (`drying::bake`) where it lies on bare raw
     /// cloth: the cloth draws oil out of it. `ex` is the bake's buffer box;
-    /// `add` the paint baking (µm, 0 where none does), `t` its settled µm
-    /// and `cover` the share of each pixel it covers, per cell of the box.
+    /// `add` the paint baking (µm, 0 where none does), `t` its settled µm,
+    /// `cover` the share of each pixel it covers and `when` the moment it
+    /// set (minutes after the soak's `t0`: the cloth is judged as it was
+    /// then, wet or dry), per cell of the box.
     /// The oil the paint's pigment doesn't hold goes, and some of what it
     /// holds from the bottom of the film, so a thin film is left lean:
     /// matte and paler, its pigment scattering in air. The oil is liquid in
@@ -1211,11 +1216,10 @@ impl Canvas {
     /// rest creeps on past the paint (`sink_halo`, once the films are
     /// baked). Cloth that already holds oil draws less. None on a primed
     /// canvas.
-    pub(crate) fn sink(&mut self, ex: (usize, usize, usize, usize), add: &[f32], t: &[f32], cover: &[f32]) -> Option<Sunk> {
+    pub(crate) fn sink(&mut self, ex: (usize, usize, usize, usize), add: &[f32], t: &[f32], cover: &[f32], when: &[f32]) -> Option<Sunk> {
         let dx = self.px_mm();
         let w = self.f.w;
         let s = self.soak.as_mut()?;
-        let now = (self.wet.clock.now - s.t0) as f32;
         let (ew, eh) = (ex.2 - ex.0, ex.3 - ex.1);
         // where paint bakes on bare cloth, and how thick it lies there
         // (where it lies), over the film around it
@@ -1256,10 +1260,11 @@ impl Canvas {
             let need = PIG_OIL * (1.0 - phi);
             let bound = phi.min(need);
             let free = phi - bound;
+            let tk = when[k];
             let cap = s.cap[i].max(1.0);
-            let held = s.oil[i] + s.oil_pend[i];
+            let held = s.oil_at(i, tk).0;
             let suction = 1.0 - 0.85 * (held / (0.3 * cap)).min(1.0);
-            let room = (cap - held - s.solv_at(i, now)).max(0.0);
+            let room = (cap - held - s.solv_at(i, tk)).max(0.0);
             let drawn = (suction * (free + DRAW_BOUND * bound * (DRAW_UM / tl.max(1e-3)).min(1.0)) * t[k]).min(room);
             if drawn <= 0.0 {
                 continue;
@@ -1270,7 +1275,7 @@ impl Canvas {
             let keep = (OIL_RETAIN * cap - held).clamp(0.0, drawn);
             if keep > 0.0 {
                 s.oil[i] += keep;
-                s.oil_since[i] = s.oil_since[i].min(now);
+                s.oil_since[i] = s.oil_since[i].min(tk);
             }
             excess[k] = drawn - keep;
             sank[k] = true;
@@ -1280,14 +1285,27 @@ impl Canvas {
             return None;
         }
         s.stained = grow(s.stained, ex);
-        // the cloth under the paint, with its oil, for the paint to lie on
-        self.soak_render(ex);
-        Some(Sunk { lean, excess, sank })
+        // the cloth under the paint as it was when the paint set, with its
+        // oil, for the paint to lie on (charcoal stays on top)
+        let drawing = self.drawing.as_deref();
+        for k in 0..ew * eh {
+            if m[k] > 0.0 {
+                let i = (ex.1 + k / ew) * w + ex.0 + k % ew;
+                let c = s.shade(i, when[k]);
+                self.px[i] = match drawing {
+                    Some(d) => d.over(i, c),
+                    None => c,
+                };
+            }
+        }
+        Some(Sunk { lean, excess, sank, when: when.to_vec() })
     }
 
     /// The oil the cloth under freshly baked paint couldn't hold (`sink`)
-    /// creeps on past each stroke's edge over the next day or two: a
-    /// darker, yellowing halo in the bare cloth around it.
+    /// creeps on past each stroke's edge over the next day or two, from
+    /// when the stroke set: a darker, yellowing halo in the bare cloth
+    /// around it. What finds no room (the stroke ringed by paint, or the
+    /// halo at its widest) stays in the cloth under the stroke.
     pub(crate) fn sink_halo(&mut self, ex: (usize, usize, usize, usize), sunk: &Sunk) {
         let (w, h) = (self.f.w, self.f.h);
         let dx = self.px_mm();
@@ -1348,19 +1366,38 @@ impl Canvas {
                 }
             }
         }
-        if budget.iter().all(|&e| e <= 1e-4) {
-            return;
-        }
-        edge.sort_unstable();
-        let cells = s.wick_cells(&self.film, self.f, (x0, y0, x1, y1), now, dx, FEATHER_BASE, None);
-        let halo = s.creep(&cells, (x0, y0, rw, rh), w, dx, now, &inside, &edge, &mut budget);
+        let budget0 = budget.clone();
+        let halo = if budget.iter().any(|&e| e > 1e-4) {
+            edge.sort_unstable();
+            // the cloth it creeps through, as it is once these strokes have set
+            let set = (0..ew * eh).filter(|&k| sunk.sank[k]).map(|k| sunk.when[k]).fold(now, f32::max);
+            let cells = s.wick_cells(&self.film, self.f, (x0, y0, x1, y1), set, dx, FEATHER_BASE, None);
+            s.creep(&cells, (x0, y0, rw, rh), w, dx, set, &inside, &edge, &mut budget)
+        } else {
+            Vec::new()
+        };
+        // the moment the stroke set, at a cell of the halo box
+        let set = |li: usize| sunk.when[(li / rw + y0 - ex.1) * ew + li % rw + x0 - ex.0];
         let s = self.soak.as_mut().unwrap();
         let mut box_ = (w, h, 0usize, 0usize);
-        for &(li, put, d, _, _) in &halo {
+        for &(li, put, d, _, o) in &halo {
             let i = (y0 + li / rw) * w + x0 + li % rw;
             let (x, y) = (i % w, i / w);
             box_ = (box_.0.min(x), box_.1.min(y), box_.2.max(x + 1), box_.3.max(y + 1));
-            s.send_oil(i, put, now + HALO_DAYS * 1440.0 * (d / HALO_MM).powi(2), now);
+            s.send_oil(i, put, set(o) + HALO_DAYS * 1440.0 * (d / HALO_MM).powi(2), now);
+        }
+        // what found no room stays under its stroke
+        for li in 0..nl {
+            let g = group[li];
+            if g == u32::MAX || exc[li] <= 0.0 || budget0[g as usize] <= 0.0 {
+                continue;
+            }
+            let give = exc[li] * (budget[g as usize] / budget0[g as usize]).clamp(0.0, 1.0);
+            if give > 0.0 {
+                let i = (y0 + li / rw) * w + x0 + li % rw;
+                s.oil[i] += give;
+                s.oil_since[i] = s.oil_since[i].min(set(li));
+            }
         }
         if box_.2 > box_.0 {
             s.active = grow(s.active, box_);
@@ -1835,6 +1872,53 @@ mod tests {
         let diff = |p: &[Rgb], q: &[Rgb]| p.iter().zip(q).map(|(x, y)| (0..3).map(|k| (x[k] - y[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
         assert!(diff(&before, a.pixels()) > 1e-3, "a month yellows the oil");
         assert!(diff(a.pixels(), b.pixels()) < 2e-4, "one wait or many: {}", diff(a.pixels(), b.pixels()));
+    }
+
+    #[test]
+    fn the_cloth_under_paint_is_judged_when_the_paint_sets() {
+        // a wet stain, then thick, fat, slow paint over it: the stain's
+        // turpentine is gone long before the paint sets, so waiting it out
+        // in one go or in two (the stain dry in between) comes out alike
+        let paint = |c: &mut Canvas| {
+            c.pour(&disc(c, 500.0, 500.0, 60.0), &blue_pour(30.0, 8.0)).unwrap();
+            brush(c, crate::wet::Paint::new(hex("#202020"), 0.9, 0.15).with_drying(0.3), 500.0, 2.0);
+        };
+        let (mut a, mut b) = (raw(200, 400.0), raw(200, 400.0));
+        paint(&mut a);
+        paint(&mut b);
+        a.wait(4.0 * 1440.0);
+        b.wait(90.0);
+        assert_eq!(b.drying_at(500.0, 500.0), crate::drying::Stage::Open);
+        b.wait(4.0 * 1440.0 - 90.0);
+        let d = a.pixels().iter().zip(b.pixels()).map(|(x, y)| (0..3).map(|k| (x[k] - y[k]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
+        assert!(d < 1e-3, "one wait or two: {d}");
+    }
+
+    #[test]
+    fn oil_with_nowhere_to_creep_stays_under_its_stroke() {
+        // fat, thick paint in a frame of glaze close around it: the halo
+        // fills the gap, and the rest of the oil stays in the cloth under
+        // the stroke instead of vanishing
+        let mut c = raw(240, 400.0);
+        let frame = Mask::from_fn(c.frame(), |x, y| {
+            let inner = x > 110.0 && x < 890.0 && y > 470.0 && y < 530.0;
+            let outer = x > 100.0 && x < 900.0 && y > 460.0 && y < 540.0;
+            if outer && !inner { 1.0 } else { 0.0 }
+        });
+        c.glaze(&Pigment::transparent(hex("#806040")), Some(&frame), |_, _| 2.0);
+        brush(&mut c, crate::wet::Paint::new(hex("#b04a30"), 0.9, 0.2), 500.0, 2.0);
+        c.dry();
+        let s = c.soak.as_ref().unwrap();
+        let f = c.window();
+        let i = f.index(500.0, 500.0);
+        assert!(s.oil[i] > 1.2 * OIL_RETAIN * s.cap[i], "oil {} of a retain {}", s.oil[i], OIL_RETAIN * s.cap[i]);
+        // and none got past the frame
+        for k in 0..s.oil.len() {
+            let (x, y) = (f.ux(k % f.w), f.uy(k / f.w));
+            if !(x > 100.0 && x < 900.0 && y > 460.0 && y < 540.0) {
+                assert!(s.oil[k] == 0.0 && s.oil_pend[k] == 0.0, "oil at ({x}, {y})");
+            }
+        }
     }
 
     #[test]

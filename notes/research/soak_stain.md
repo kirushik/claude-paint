@@ -64,12 +64,18 @@ Sources are listed at the end; [n] marks them. "Estimate" marks numbers not take
 ## Oil paint brushed onto raw canvas
 - "The sinking of oil into unprimed canvas can lead to ... darkening, and halos of
   oil staining where raw canvas is exposed" [5].
-- Bacon painted on the unprimed side of the canvas, "forcing the paint to dry very
-  rapidly and resist any attempts at clean removal" [18].
-- Paint that loses oil until its pigment is no longer wetted (above the critical
-  pigment volume concentration) has air between the particles: it scatters more,
-  so it looks matte and paler, and darks lose the most depth (general paint
-  science, not from the sources above).
+- Paint applied directly to raw canvas in Bacon's work: "the oil medium is absorbed
+  to some extent, leaving the paint underbound" (J.E. Russell's study of Bacon's
+  materials, as quoted in [5]). Bacon painted on the unprimed side of the canvas,
+  "forcing the paint to dry very rapidly and resist any attempts at clean removal"
+  [18].
+- On raw canvas "The canvas absorbs the oil paint quickly, making it difficult to
+  control and blend"; "oil paint becomes firm quickly and appears cloudy or soft";
+  around a blue stroke after four months, "The yellow halo is the linseed oil" [5].
+- Why underbound paint looks matte and paler: paint that loses oil until its
+  pigment is no longer wetted (above the critical pigment volume concentration)
+  has air between the particles, so it scatters more, and darks lose the most
+  depth (general paint science, not from the sources above).
 - The engine: the cloth draws out the oil the pigment doesn't hold and 60% of what
   it holds from the bottom 25 µm of the film, judged over 1.25 mm of film (the oil
   is liquid in it); paint on bare cloth sets 4× sooner; oil the fibres can't keep
@@ -105,4 +111,4 @@ Sources are listed at the end; [n] marks them. "Estimate" marks numbers not take
 15. Lekner & Dorf, Why some things are darker when wet (1988): https://pubmed.ncbi.nlm.nih.gov/20531554/
 16. Twomey, Bohren, Mergenthaler, Reflectance and albedo differences between wet and dry surfaces (1986): https://opg.optica.org/ao/abstract.cfm?uri=ao-25-3-431
 17. ScienceABC, why wet clothes look darker: https://www.scienceabc.com/eyeopeners/why-do-clothes-appear-darker-when-they-get-wet-1
-18. Jack Schaedler, notes on Francis Bacon (citing Michael Peppiatt, *Francis Bacon: Anatomy of an Enigma*): https://jackschaedler.github.io/notes/bacon.html
+18. Jack Schaedler, notes on Francis Bacon (the quoted sentence is Schaedler's; the notes draw on Michael Peppiatt, *Francis Bacon: Anatomy of an Enigma*): https://jackschaedler.github.io/notes/bacon.html
