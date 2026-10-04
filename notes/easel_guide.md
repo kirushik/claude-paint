@@ -237,8 +237,9 @@ print(soaked(x, y))                   -- what is in the cloth there, in words
 
 - `pour` lands the pile, thinned with `thinner` parts of turpentine to one
   part of paint (0.5 to 50), where the mask's coverage says, `ml` of it in
-  all. It wicks outward through the weave until the cloth has taken it all
-  (cotton duck holds about 0.3 mm of liquid): more poured, wider stain; where
+  all. The cloth where it lands takes up what its pores hold, and the rest
+  wicks outward through the weave until the cloth has taken it all (cotton
+  duck holds about 0.3 mm of liquid): more poured, wider stain; where
   more of the mask's coverage lands, it pushes further. The stain is a little
   longer down the canvas (the warp), its edge feathers along the threads,
   and it is densest where it landed: the fibres filter the pigment out as
@@ -270,8 +271,9 @@ print(soaked(x, y))                   -- what is in the cloth there, in words
   paint keeps more. Oil the fibres under it can't keep creeps on past the
   stroke over the next day or two: a darker, yellowing halo in the bare
   cloth around fat or thick paint. Paint over paint, or over cloth already
-  oily from a stain, gives up less. The film seals the cloth: nothing
-  poured later soaks in under it, and a pour runs around it.
+  oily from a stain, gives up less. The paint seals the cloth, wet or dry:
+  nothing poured later soaks in under it, and what is poured on the paint
+  runs off it into the cloth beside it.
 
 ## Masks and geometry
 
